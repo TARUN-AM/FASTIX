@@ -6,12 +6,12 @@
 
 **A blockchain-enforced anti-scalping ticketing protocol built for India's live-event ecosystem.**
 
-[[https://img.shields.io/badge/The%20Big%20Hack%202.0-Track%2002%20%C2%B7%20B2-0A1128?style=for-the-badge&logo=ethereum&logoColor=38BDF8]](https://github.com/<your-username>/FASTIX)
-[[https://img.shields.io/badge/Solidity-0.8.24-1E293B?style=for-the-badge&logo=solidity&logoColor=white]](https://soliditylang.org/)
-[[https://img.shields.io/badge/Hardhat-Smart%20Contracts-0F172A?style=for-the-badge&logo=ethereum&logoColor=F59E0B]](https://hardhat.org/)
-[[https://img.shields.io/badge/React%2018-Vite%20%2B%20Tailwind-0B192C?style=for-the-badge&logo=react&logoColor=38BDF8]](https://react.dev/)
-[[https://img.shields.io/badge/Node.js-Express%20%2B%20MongoDB-0A1128?style=for-the-badge&logo=node.js&logoColor=10B981]](https://nodejs.org/)
-[[https://img.shields.io/badge/License-MIT-1E3A8A?style=for-the-badge]](LICENSE)
+[https://img.shields.io/badge/The%20Big%20Hack%202.0-Track%2002%20%C2%B7%20B2-0A1128?style=for-the-badge&logo=ethereum&logoColor=38BDF8]
+[https://img.shields.io/badge/Solidity-0.8.24-1E293B?style=for-the-badge&logo=solidity&logoColor=white]
+[https://img.shields.io/badge/Hardhat-Smart%20Contracts-0F172A?style=for-the-badge&logo=ethereum&logoColor=F59E0B]
+[https://img.shields.io/badge/React%2018-Vite%20%2B%20Tailwind-0B192C?style=for-the-badge&logo=react&logoColor=38BDF8]
+[https://img.shields.io/badge/Node.js-Express%20%2B%20MongoDB-0A1128?style=for-the-badge&logo=node.js&logoColor=10B981]
+[https://img.shields.io/badge/License-MIT-1E3A8A?style=for-the-badge]
 
 </div>
 
@@ -182,4 +182,4 @@ npm run dev
 
 ## License
 
-This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
+Licensed under the **MIT License**.
