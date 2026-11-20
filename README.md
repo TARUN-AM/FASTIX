@@ -169,9 +169,9 @@ npm run dev
 
 ## Team
 
-- `[Team Member 1]` — Smart Contracts & Security Architecture
-- `[Team Member 2]` — Backend API, Identity Nullifier & Indexing
-- `[Team Member 3]` — Frontend Engineering & Motion Design
+- `[Sriram]` — Smart Contracts & Security Architecture
+- `[Tarun]` — Backend API, Identity Nullifier & Indexing
+- `[Kavya and Sakshi]` — Frontend Engineering & Motion Design
 
 ## License
 
