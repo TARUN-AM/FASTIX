@@ -1,0 +1,153 @@
+ROLE
+Act as a Senior Full-Stack Developer and Cybersecurity Engineer working on the FairTicket project.
+
+STEP 0: READ FIRST (mandatory)
+1. Read docs/ARCHITECTURE.md completely, especially section 2 (constants and money rules), section 5 (Event model, enums, indexes), section 7 (event API routes), section 8 (frontend pages and routes), section 9 (booking hold state machine and event lifecycle), section 10 (concurrency plan) and section 12 (security design).
+2. Read every existing file related to this task: backend config (env.js, constants.js), utils (money.js, normalize.js, validators.js, apiResponse.js, publicUser.js), middleware (authenticate.js, requireRole.js, requireVerifiedUser.js, rateLimiters.js, errorHandler.js), models (Event.js, Booking.js, Ticket.js, SecurityLog.js, User.js), controllers, services, routes, app.js, scripts/seedStaff.js, tests/setup.js, tests/helpers/db.js and the existing tests; frontend src/api/client.js, AuthContext, ProtectedRoute, App.jsx, config/routes.js, config/navigation.js, utils/money.js, utils/dates.js, pages/EventList.jsx, pages/EventDetails.jsx, pages/OrganizerDashboard.jsx, components/verification/VerificationGate.jsx and the ui components.
+3. Preserve everything that works. Do not rewrite files that do not need changes. All existing backend tests and the frontend build must keep working. Do not weaken or delete any existing test.
+4. Use route paths, field names and enum values EXACTLY as written in ARCHITECTURE.md and constants.js. If this prompt conflicts with ARCHITECTURE.md, follow ARCHITECTURE.md and list the conflict in the final report.
+5. If a field, route, enum or env variable I mention here does not exist in ARCHITECTURE.md, you may add the smallest possible addition, but you MUST also update docs/ARCHITECTURE.md (the relevant section) and list every addition in the final report. Never add things silently.
+
+THIS TASK
+Build event management: create, edit, publish and cancel (organizers and admins), plus public browsing. Backend and frontend.
+Do NOT build: the queue, queue allocation jobs, booking holds, CAPTCHA, payments, tickets, resale, QR, blockchain or contract calls (including createEvent on the contract; that is Prompts 15 to 17) or Trust Guardian. Do NOT touch /blockchain. Add no new npm packages. If you believe one is required, stop and explain why in the report.
+
+PART A: CONFIG AND CONSTANTS
+1. constants.js and ARCHITECTURE.md (use the existing naming style):
+   - EVENT_MIN_PRICE_PAISE = 10000 (Rs 100) and EVENT_MAX_PRICE_PAISE = 50000000 (Rs 5,00,000).
+   - EVENT_MAX_TOTAL_TICKETS = 100000.
+   - EVENT_MIN_REGISTRATION_WINDOW_MINUTES = 1 (so a demo can use short windows).
+   - EVENT_LIST_MAX_PAGE_SIZE = 50 and EVENT_LIST_DEFAULT_PAGE_SIZE = 12.
+   - EVENT_STATUS_TRANSITIONS: a frozen map of allowed organizer/admin-driven transitions. In THIS prompt the only transitions are DRAFT -> PUBLISHED and any of the cancellable statuses -> CANCELLED. Use the real status names from ARCHITECTURE.md section 5 and 9. If statuses such as REGISTRATION_OPEN, REGISTRATION_CLOSED or BOOKING_OPEN exist, they are set later by the queue and booking prompts (11 and 12); do NOT create automatic transitions or background jobs now. Add a comment saying so.
+   - SecurityLog types (severity in brackets): EVENT_CREATED (LOW), EVENT_UPDATED (LOW), EVENT_PUBLISHED (LOW), EVENT_CANCELLED (MEDIUM), EVENT_ACCESS_DENIED (MEDIUM).
+2. env.js, .env.example (comment above each) and ARCHITECTURE.md section 14: EVENT_WRITE_RATE_LIMIT_MAX (default 60 per 60 minutes per user) and EVENT_READ_RATE_LIMIT_MAX (default 200 per 15 minutes per IP). Validate as positive integers.
+
+PART B: MODEL ADJUSTMENTS (only if needed; follow ARCHITECTURE.md section 5)
+Check the Event model from Prompt 3. The expected fields are: title, description, venueName, city, startsAt, registrationOpensAt, registrationClosesAt, totalTickets, pricePaise, maxPerUser, holdMinutes, status, organizerId, and inventory counters. If something is missing, add the smallest set and update section 5 and the report. In particular make sure these exist:
+- organizerId (ObjectId ref User, required, indexed, NEVER changeable after creation).
+- publishedAt and cancelledAt (dates, optional), cancelReason (string max 300, optional).
+- Inventory counters exactly as ARCHITECTURE.md defines them (for example ticketsAvailable, ticketsHeld, ticketsSold). They are set at creation (available = totalTickets, held = 0, sold = 0) and are NEVER writable through the event API. Prompts 12 and 14 will update them atomically.
+- Do not remove or weaken any validation or index from Prompt 3 (maxPerUser <= MAX_ACTIVE_TICKETS, holdMinutes 1 to 30, whole-number money).
+Add a pre-validate rule or service rule: startsAt must be after registrationClosesAt, and registrationClosesAt must be after registrationOpensAt by at least EVENT_MIN_REGISTRATION_WINDOW_MINUTES.
+
+PART C: VALIDATION (src/utils/eventValidators.js, hand-written)
+Reuse isPlainString and rejectUnknownFields. Every validator returns { valid, value, message }; the controller collects ALL field errors together into error.details (an array of { field, message }) with HTTP 400 and code VALIDATION_ERROR.
+- title: plain string, 3 to 120 characters after trimming and collapsing spaces. venueName: 2 to 120. city: 2 to 60. description: optional, up to 2000 characters, plain text only.
+- Text must not contain "<" or ">" characters (reject them with a clear message; the frontend renders text as plain text anyway).
+- pricePaise: must be a JSON number that is a safe integer between EVENT_MIN_PRICE_PAISE and EVENT_MAX_PRICE_PAISE. Reject strings, decimals, negatives, NaN and Infinity.
+- totalTickets: safe integer from 1 to EVENT_MAX_TOTAL_TICKETS.
+- maxPerUser: safe integer from 1 to MAX_ACTIVE_TICKETS. holdMinutes: safe integer 1 to 30 (default DEFAULT_HOLD_MINUTES when omitted).
+- Dates (startsAt, registrationOpensAt, registrationClosesAt): plain strings in strict ISO 8601 format (with "Z" or an explicit offset); reject anything else including numbers and objects. Parse to Date, reject invalid dates. At creation: registrationClosesAt must be in the future; startsAt must be after registrationClosesAt; closes must be after opens by at least EVENT_MIN_REGISTRATION_WINDOW_MINUTES. registrationOpensAt MAY be in the past or near-future (so a demo can open registration immediately).
+- Unknown fields are rejected with 400. In particular these must be rejected on create and edit: organizerId, status, ticketsAvailable, ticketsHeld, ticketsSold (or whatever the counter names are), publishedAt, cancelledAt, _id, id, role.
+- A helper isValidObjectId(value) (24 hex characters) used for every :id parameter. An invalid id returns 404 NOT_FOUND (never a 500 CastError).
+
+PART D: EVENT SERVICE (src/services/event.service.js)
+1. toPublicEvent(eventDoc): a whitelist for public and customer responses: id, title, description, venueName, city, startsAt, registrationOpensAt, registrationClosesAt, totalTickets, pricePaise, maxPerUser, holdMinutes, status, phase (see 6), soldOut (boolean computed from the counters), maxResalePricePaise (computed with calculateMaxResalePrice from utils/money.js), publishedAt, organizerName (the organizer's name only). NEVER include organizerId, organizer email or phone, held-ticket counts or any internal counter. toOwnerEvent(eventDoc) adds organizerId-free management fields (ticketsAvailable, ticketsSold, ticketsHeld, cancelReason, cancelledAt) and is used only for the owner and ADMIN.
+2. createEvent(organizerId, input, requestMeta): creates a DRAFT with counters initialised and organizerId from the authenticated user (never from the body). SecurityLog EVENT_CREATED.
+3. updateEvent(eventId, actor, input, requestMeta):
+   - Load the event. If it does not exist, or the actor is an ORGANIZER who is not the owner, return HTTP 404 NOT_FOUND. For the not-owner case write SecurityLog EVENT_ACCESS_DENIED (with eventId and actor id) before returning the same 404.
+   - ORGANIZER may edit only their own events. ADMIN may NOT edit event content (admins can only cancel). An ADMIN edit attempt returns 403 FORBIDDEN.
+   - While status is DRAFT, every allowed field may change (re-run the same time-order validation on the merged values).
+   - After DRAFT (published or later), ONLY description may change. Any other field in the body returns 409 EVENT_LOCKED with a message "After publishing, only the description can be changed. Cancel and recreate the event to change other details." Do not partially apply anything.
+   - Cancelled events cannot be edited (409 EVENT_LOCKED).
+   - Apply the update ATOMICALLY with findOneAndUpdate where the filter includes _id, organizerId and the status you read (so a concurrent publish cannot sneak in between). If it matches nothing, re-read and return the correct 404 or 409.
+   - SecurityLog EVENT_UPDATED listing the changed field NAMES only.
+4. publishEvent(eventId, actor, requestMeta): only the owning ORGANIZER. ATOMIC transition with findOneAndUpdate filter { _id, organizerId, status: DRAFT, registrationClosesAt: { $gt: now } }, setting status PUBLISHED and publishedAt. If nothing matched: not found or not owner -> 404; status not DRAFT -> 409 INVALID_EVENT_STATE; registration already closed -> 409 EVENT_REGISTRATION_ALREADY_CLOSED. Two simultaneous publish requests must produce exactly one success. SecurityLog EVENT_PUBLISHED.
+5. cancelEvent(eventId, actor, { reason }, requestMeta): owning ORGANIZER or ADMIN. Reason: plain string 3 to 300 characters (required). Allowed only from the statuses that EVENT_STATUS_TRANSITIONS lists as cancellable. Guard: if any Booking or Ticket document exists for this event, return 409 EVENT_HAS_BOOKINGS ("Events with bookings cannot be cancelled yet. Refund handling is not built in this version."). ATOMIC transition with the status condition in the filter. SecurityLog EVENT_CANCELLED (the reason text is allowed in the log details; it contains no personal data). A comment must say that the guard exists because refunds and contract-side cancellation are not designed yet.
+6. getEventPhase(event, now = new Date()): a PURE function returning one of: "DRAFT", "UPCOMING" (published, registration not open yet), "REGISTRATION_OPEN", "REGISTRATION_CLOSED", "CANCELLED". Based on status and the registration timestamps only. Add a comment that Prompts 11 and 12 will add queue and booking phases, and that status stays the stored source of truth while phase is a derived display value. If ARCHITECTURE.md already defines these phases or statuses, align names with it and report.
+7. listPublicEvents({ page, limit, city, q }): returns { items, page, limit, total, totalPages }.
+   - Only events whose status is not DRAFT and not CANCELLED. Sort by startsAt ascending, then _id for a stable order.
+   - page: integer >= 1 (default 1). limit: integer 1 to EVENT_LIST_MAX_PAGE_SIZE (default EVENT_LIST_DEFAULT_PAGE_SIZE). Invalid values return 400 VALIDATION_ERROR (do not silently clamp strings to something odd; objects/arrays from query strings such as city[$ne]=x must be rejected with 400, because Express can parse them into objects).
+   - city: plain string up to 60 characters, case-insensitive exact match. q: plain string up to 50 characters, case-insensitive "contains" match on title, built from an ESCAPED string (escape every regex special character) so that q=".*" or "(a+)+$" matches only those literal characters. Use lean queries and select only the whitelisted fields.
+8. getPublicEvent(eventId, viewer): DRAFT events are visible only to the owner and ADMIN (404 for everyone else including logged-out users and other organizers). CANCELLED events are visible to everyone (so people with an old link see why it is gone). Public responses use toPublicEvent.
+9. listMyEvents(organizerId, { page, limit, status }): all of the organizer's own events (including DRAFT and CANCELLED), newest first, using toOwnerEvent, with the same pagination rules. status filter must be a value from the enum.
+
+PART E: ROUTES, RATE LIMITERS, LOGGING
+Implement the event routes listed in ARCHITECTURE.md section 7. They are expected to be (follow section 7 if different):
+- GET  /api/v1/events (public; read limiter) query: page, limit, city, q
+- GET  /api/v1/events/mine (ORGANIZER; authenticate) query: page, limit, status. IMPORTANT: register this route BEFORE /events/:id so "mine" is not read as an id.
+- GET  /api/v1/events/:id (public, with OPTIONAL authentication: if a valid Bearer token is present, attach the user; if the token is missing or invalid, continue as logged out and do not return 401. Write a small optionalAuthenticate middleware that reuses the verification logic and loads the user from the database.)
+- POST /api/v1/events (ORGANIZER; authenticate; write limiter)
+- PATCH /api/v1/events/:id (ORGANIZER; authenticate; write limiter)
+- POST /api/v1/events/:id/publish (ORGANIZER; authenticate; write limiter)
+- POST /api/v1/events/:id/cancel (ORGANIZER, ADMIN; authenticate; write limiter) body: { reason }
+- Add createEventWriteLimiter (keyed by user id) and createEventReadLimiter (keyed by IP) to src/middleware/rateLimiters.js (overridable options, standard error shape, code RATE_LIMITED, HTTP 429).
+- All errors use the standard response shape { success, data, error: { code, message } } and never leak stack traces or database errors. Mount the router in app.js.
+- Make sure responses to public routes never contain organizerId, organizer contact details or internal counters.
+
+PART F: DEMO SEED SCRIPT (backend/scripts/seedEvents.js, npm script "seed:events")
+- Refuses to run when NODE_ENV is "production".
+- Requires the demo organizer organizer@fairticket.demo from seed:staff; if it is missing, print a clear message telling me to run "npm run seed:staff" first and exit with code 1.
+- Creates three PUBLISHED demo events owned by that organizer, idempotent by exact title (do not create twice). Titles must be clearly labeled and must NOT contain any real artist, band or company name, for example "Demo Concert: Summer Lights", "Demo Concert: City Beats", "Demo Concert: Riverside Night". Mix the schedules: one whose registration is open now (opens 5 minutes ago, closes in 60 minutes, starts in 30 days), one that opens in 2 hours, one with a short window useful for demos (opens now, closes in 10 minutes). Use prices Rs 5,000, Rs 2,500 and Rs 7,500 (in paise), totalTickets 100, 500 and 50, maxPerUser 2, holdMinutes 5.
+- Print a summary: created or already existed. Export the core function separately from the CLI so tests can run it.
+
+PART G: BACKEND TESTS (Jest + Supertest, test database only)
+Create tests/events.test.js. Use helpers that create an ORGANIZER, a second ORGANIZER, an ADMIN and a CUSTOMER (insert directly and sign tokens). Clear collections between tests. Cover AT LEAST:
+Create and validation:
+- ORGANIZER creates an event: 201, status DRAFT, counters initialised (available equals total, held 0, sold 0), organizerId equals the caller. SecurityLog EVENT_CREATED exists.
+- CUSTOMER, ADMIN and GATE_STAFF get 403 on create; no token gets 401.
+- Body containing organizerId, status, any counter name, publishedAt, _id or role returns 400 and creates nothing.
+- Invalid values each return 400 VALIDATION_ERROR with field details: price below the minimum, above the maximum, decimal (500000.5), string ("500000"), negative, NaN; totalTickets 0, decimal, above max; maxPerUser 3; holdMinutes 0 and 31; title too short; text containing "<script>"; non-ISO dates, number dates, objects; startsAt before registrationClosesAt; registrationClosesAt in the past; window shorter than the minimum; arrays or objects where strings are expected. Several errors in one request are all reported together. None cause a 500.
+Edit rules:
+- Owner can edit every allowed field while DRAFT; time-order is re-validated on the merged values.
+- Another ORGANIZER editing someone else's event gets 404 and an EVENT_ACCESS_DENIED log entry. ADMIN editing content gets 403. CUSTOMER gets 403.
+- After publishing, changing description succeeds; changing price, totalTickets, maxPerUser, holdMinutes, any date, title or venue returns 409 EVENT_LOCKED and nothing is changed (check the database). A mixed body (description plus price) is rejected as a whole.
+- Cancelled events cannot be edited.
+- Invalid ObjectId in the URL returns 404, not 500.
+Publish:
+- Owner publishes a DRAFT: status PUBLISHED, publishedAt set, log entry exists. Publishing again returns 409 INVALID_EVENT_STATE.
+- Non-owner organizer gets 404. CUSTOMER gets 403.
+- Publishing an event whose registrationClosesAt has passed (change it directly in the database) returns 409 EVENT_REGISTRATION_ALREADY_CLOSED.
+- Two simultaneous publish requests (Promise.all): exactly one 200 and one 409.
+- A publish racing an edit of the price (Promise.all): the price is never changed after the status became PUBLISHED (assert the final database state is consistent: either the price changed and then published, or the edit was rejected with 409).
+Cancel:
+- Owner cancels a PUBLISHED event with a reason: status CANCELLED, cancelledAt and cancelReason set, log entry exists. ADMIN can cancel any event. Another organizer gets 404.
+- Missing, too short, too long or non-string reason returns 400.
+- An event that has a Booking (or Ticket) document returns 409 EVENT_HAS_BOOKINGS and stays unchanged (insert a minimal booking directly).
+- Cancelling twice returns 409 INVALID_EVENT_STATE. Two simultaneous cancels: exactly one success.
+Public reading:
+- GET /events returns only non-DRAFT, non-CANCELLED events, sorted by startsAt, with pagination fields. A DRAFT never appears. Logged-out access works.
+- Response objects contain only whitelisted fields: serialize the response and assert it does not contain organizerId, the organizer's email or phone, "ticketsHeld" or other internal counter names.
+- maxResalePricePaise equals 550000 for a Rs 5,000 event (and 1098 for a 999-paise price if allowed by the minimum; otherwise use a valid price and check floor math with 10001 -> 11001).
+- page=0, page=-1, page=abc, limit=0, limit=1000, limit=1.5 return 400. city[$ne]=x and q[$regex]=. (object-style query values) return 400, never all events.
+- q=".*" returns no events unless a title literally contains ".*"; q="(a+)+$" returns quickly with no error (no catastrophic regex). A normal q=summer (any case) finds the right event. city filter is case-insensitive.
+- Pagination: with 30 events, limit 12 gives 12, 12, 6 across three pages, with the right total and totalPages and no duplicate or missing event between pages.
+- GET /events/:id: DRAFT returns 404 for logged-out users, customers and other organizers, and 200 for the owner and ADMIN. A CANCELLED event is returned with status CANCELLED to everyone. A garbage Bearer token on this route still returns the public data (no 401).
+- GET /events/mine returns only the caller's own events including DRAFT and CANCELLED, never someone else's; the route is not captured by /events/:id; CUSTOMER gets 403.
+Phase unit tests: getEventPhase returns DRAFT, UPCOMING, REGISTRATION_OPEN, REGISTRATION_CLOSED and CANCELLED correctly for boundary times (exactly at opens and closes: define the boundaries clearly in a comment and test them).
+Rate limiters: write and read limiters return 429 when exceeded (test routers with tiny limits).
+Seed script: refuses in production; fails clearly without the demo organizer; creates three events; is idempotent when run twice; titles contain no real artist names.
+Config tests: EVENT_WRITE_RATE_LIMIT_MAX and EVENT_READ_RATE_LIMIT_MAX defaults and rejection of 0, negative, decimal and non-numeric values.
+Model tests: a direct Mongoose save with maxPerUser 3 or a close time before the open time is rejected.
+All previous tests (health, models, money, auth, phoneOtp, identity, duplicateIdentity, wallet) must still pass.
+
+PART H: FRONTEND
+1. src/api/events.js: listEvents(params), getEvent(id), listMyEvents(params), createEvent(values), updateEvent(id, values), publishEvent(id), cancelEvent(id, reason). Do not change client.js unless truly required.
+2. src/utils/money.js: add parseRupeesToPaise(text): accepts only a string matching ^\d{1,9}(\.\d{1,2})?$ after trimming; converts by splitting on "." and using integer arithmetic only (never parseFloat, never multiplication of a decimal), padding the paise part to two digits. Returns null for invalid input. Add calculateMaxResalePrice(paise) = Math.floor(paise * 110 / 100) for display only (a comment says the backend and contract are the real authority). Unit-test-by-example in the /dev/design-system page: "5000" -> 500000, "5000.5" -> 500050, "5000.50" -> 500050, "0.01" -> 1, "5,000" -> null, "5000.505" -> null, "abc" -> null, "" -> null.
+3. src/pages/EventList.jsx (public; path from section 8): a page with a search box (q) and a city filter (debounced 400 ms), a responsive grid of event Cards (title, "Demo" badge if the title starts with "Demo", venue and city, start date via formatDateTime, price via formatRupees, a StatusPill for the phase, and "Sold out" when soldOut), pagination controls (Previous, Next, "Page X of Y"), loading Skeletons, an EmptyState for no results, and an error Alert with Retry. Keep the filter and page in the URL query string (useSearchParams) so refresh and back button work. Cards link to the details page. Cancel in-flight requests when filters change (AbortController) so slow responses cannot overwrite newer ones.
+4. src/pages/EventDetails.jsx (public; path from section 8): loads the event by route id with loading, 404 (friendly "Event not found") and error states. Shows title, description (rendered as PLAIN TEXT, never dangerouslySetInnerHTML), venue, city, start date, price (formatRupees), a "Fair-ticket rules" panel (verified identity required; maximum {maxPerUser} tickets per verified person; resale capped at 110% = formatRupees(maxResalePricePaise); tickets are checked at the gate with a signed QR), a registration-window timeline (opens, closes, event starts) and the phase pill. Use a display-only countdown to registration opening or closing based on server timestamps (a comment says the server decides; the countdown is informational and recomputed from the stored timestamps, not from the browser clock alone: compute the offset between the browser clock and the response Date header once and apply it). The action area: for logged-out visitors a "Log in to join" button; for CUSTOMER users wrap a DISABLED "Join queue (coming in Prompt 11)" button inside VerificationGate with requireWallet so users see what is missing; for staff roles show an info note. Cancelled events show a prominent danger Alert with the cancel reason.
+5. Organizer screens (minimal; the full dashboard is Prompt 30). Under the organizer dashboard path from routes.js add sub-routes (update ARCHITECTURE.md section 8 and routes.js, and wrap them with ProtectedRoute for ORGANIZER): the dashboard path itself shows a "My events" table; "/new" (or the equivalent under that path) shows the event form; "/:id/edit" edits an event.
+   - src/components/events/EventForm.jsx: fields Title, Description (Textarea with a live character counter), Venue name, City, Event start (datetime-local), Registration opens (datetime-local), Registration closes (datetime-local), Ticket price in rupees (text input, inputMode="decimal"), Total tickets (number), Max tickets per person (Select 1 or 2), Hold time in minutes (number 1 to 30, hint "How long a fan has to pay once it is their turn"). Convert datetimes with new Date(value).toISOString() and rupees with parseRupeesToPaise; if the conversion fails show a field error and do not submit. Client-side validation mirrors the backend rules (UX only), field-level errors with aria-describedby, server field errors from error.details shown on the matching fields, isLoading on submit, no double submit. Add a quick-fill button "Demo timing" (only visible when import.meta.env.DEV) that sets registration to open now and close in 10 minutes and the event start in 30 days.
+   - In edit mode for non-DRAFT events, disable every field except Description and show an info Alert explaining the lock rule.
+   - "My events" table (Table component): title, status pill, start date, price, tickets (available / total for the owner), actions: Edit (if allowed), Publish (with a confirmation Modal that lists the fields that will become locked), Cancel (Modal with a required reason field). Handle 409 responses with friendly messages (EVENT_LOCKED, INVALID_EVENT_STATE, EVENT_REGISTRATION_ALREADY_CLOSED, EVENT_HAS_BOOKINGS). Refresh the list after every action and show toasts.
+   - ADMIN has no UI here (Prompt 29 builds it).
+6. Navigation: make sure the Events link is visible to everyone, and the organizer sees a "My events" link (config/navigation.js).
+7. Keep the design rules from Prompt 4: only existing Tailwind color tokens, Lucide icons, no real artist or company names, works at 360px, no horizontal scrolling. The Table scrolls inside its own container.
+8. Accessibility: labels linked to inputs, aria-live="polite" for loading and result messages, Modal focus handling from Prompt 4, keyboard-usable pagination.
+
+PART I: CHECK YOUR OWN WORK
+1. Verify every import path and that there are no circular imports.
+2. Search the whole codebase for any response, log or query that could leak organizerId, organizer contact details or internal counters to the public, and for any place a client-supplied status, counter or organizerId could be written. Fix any you find and list the searches you did.
+3. Verify every status transition uses an atomic conditional update (condition in the filter, not read-then-write).
+4. Verify every error follows { success, data, error: { code, message } }, and that no route can produce a 500 from bad input (query objects, invalid ids, wrong types).
+5. Verify "npm run build" in /frontend succeeds and "npm test" in /backend would pass.
+6. Do not claim anything works unless you ran it. If you cannot run a command or use the browser, say exactly: "NOT RUN - please test locally".
+
+FINAL REPORT FORMAT
+1. Files created and files modified (two lists).
+2. API table: method | path | roles | request body or query | success response | error codes.
+3. Event lifecycle table: status | who can move it | to which status | conditions.
+4. Additions to ARCHITECTURE.md (fields, enums, constants, env variables, frontend sub-routes), conflicts found and how you resolved them.
+5. Exact commands for me to run, in order: install if needed, update .env from .env.example, run backend tests, run "npm run seed:staff" (if not done) and "npm run seed:events", start backend and frontend, and a manual browser test script.
+6. What worked, what was NOT run, and known limitations. Include: after publishing only the description can change (a deliberate rule); cancellation is blocked once bookings exist because refunds are not designed yet; no automatic status changes until Prompts 11 and 12; the contract-side createEvent is built in Prompts 15 to 17; the organizer screens are minimal until Prompt 30; no event images. Be honest.
+Do not start Prompt 11 or any other feature.
