@@ -1,0 +1,21 @@
+export const MAX_ACTIVE_TICKETS = 2;
+export const RESALE_CAP_PERCENT = 110;
+export const SCALPING_WARNING_MULTIPLIER = 5;
+export const DEFAULT_HOLD_MINUTES = 5;
+export const QR_TOKEN_TTL_SECONDS = 30;
+export const CHAIN_ID = 31337;
+
+export const USER_ROLES = Object.freeze({
+  PUBLIC: "PUBLIC",
+  CUSTOMER: "CUSTOMER",
+  ORGANIZER: "ORGANIZER",
+  ADMIN: "ADMIN",
+  GATE_STAFF: "GATE_STAFF",
+});
+
+export const ALL_AUTHENTICATED_ROLES = Object.freeze([
+  USER_ROLES.CUSTOMER,
+  USER_ROLES.ORGANIZER,
+  USER_ROLES.ADMIN,
+  USER_ROLES.GATE_STAFF,
+]);
