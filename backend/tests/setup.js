@@ -21,3 +21,8 @@ if (!process.env.IDENTITY_PROVIDER) {
 if (!process.env.SMS_PROVIDER) {
   process.env.SMS_PROVIDER = "mock";
 }
+
+// Tests create many accounts from one IP; raise per-IP limiters for tests only.
+process.env.AUTH_REGISTER_RATE_LIMIT_MAX = "1000";
+process.env.AUTH_LOGIN_RATE_LIMIT_MAX = "1000";
+process.env.RATE_LIMIT_MAX_REQUESTS = "100000";

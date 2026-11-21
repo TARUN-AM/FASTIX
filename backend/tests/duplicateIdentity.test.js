@@ -431,7 +431,7 @@ describe("Duplicate Identity Prevention, Gate & Integrity Integration Tests (Mon
     const fiveUsers = [];
     for (let i = 0; i < 5; i += 1) {
       fiveUsers.push(
-        await createCustomerWithVerifiedPhone({ fullName: `Racer ${i + 1}` })
+        await createCustomerWithVerifiedPhone({ fullName: `Racer ${["One", "Two", "Three", "Four", "Five"][i]}` })
       );
     }
 
